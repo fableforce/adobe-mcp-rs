@@ -42,11 +42,11 @@
           <Type>Panel</Type>
           <Menu>Premiere MCP Bridge</Menu>
           <Geometry>
-          <Size>
-            <Width>360</Width>
-            <Height>320</Height>
-          </Size>
-        </Geometry>
+            <Size>
+              <Height>320</Height>
+              <Width>360</Width>
+            </Size>
+          </Geometry>
       </UI>
       </DispatchInfo>
     </Extension>

@@ -1448,6 +1448,16 @@ result_file = "bridge/result.json"
     }
 
     #[test]
+    fn premiere_cep_bridge_stays_extendscript_compatible() {
+        let source = include_str!("../../../src/premiere/cep/mcp-bridge-premiere/jsx/bridge.jsx");
+        assert!(!source.contains("toISOString()"));
+        assert!(source.contains("tempFile.rename(targetName)"));
+        assert!(source.contains("backupFile.rename(targetName)"));
+        assert!(source.contains("targetFile.rename(backupFile.name)"));
+        assert!(!source.contains("file.rename(backupFile.name)"));
+    }
+
+    #[test]
     fn script_allowlist_contains_core_entries() {
         assert!(is_allowed_script("listCompositions"));
         assert!(is_allowed_script("applyEffectTemplate"));

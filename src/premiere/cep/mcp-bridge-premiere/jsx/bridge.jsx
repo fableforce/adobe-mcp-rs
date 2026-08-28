@@ -71,6 +71,25 @@ var mcpBridgeState = {
 
 var mcpBridgeInstanceId = null;
 
+function mcpBridgePadNumber(value, width) {
+    var text = String(value);
+    while (text.length < width) {
+        text = "0" + text;
+    }
+    return text;
+}
+
+function mcpBridgeIsoTimestamp() {
+    var now = new Date();
+    return mcpBridgePadNumber(now.getUTCFullYear(), 4) + "-" +
+        mcpBridgePadNumber(now.getUTCMonth() + 1, 2) + "-" +
+        mcpBridgePadNumber(now.getUTCDate(), 2) + "T" +
+        mcpBridgePadNumber(now.getUTCHours(), 2) + ":" +
+        mcpBridgePadNumber(now.getUTCMinutes(), 2) + ":" +
+        mcpBridgePadNumber(now.getUTCSeconds(), 2) + "." +
+        mcpBridgePadNumber(now.getUTCMilliseconds(), 3) + "Z";
+}
+
 function mcpBridgeRootFolder() {
     var docs = Folder.myDocuments;
     var root = new Folder(docs.fsName + "/pr-mcp-bridge");
@@ -173,6 +192,8 @@ function mcpBridgeAtomicWriteText(file, text) {
     if (file.parent && !file.parent.exists && !file.parent.create()) {
         throw new Error("Failed to create directory: " + file.parent.fsName);
     }
+    var targetName = file.name;
+    var targetPath = file.fsName;
     mcpBridgeCleanupAtomicResidues(file);
     mcpBridgeAtomicWriteCounter += 1;
     var suffix = new Date().getTime() + "-" + mcpBridgeAtomicWriteCounter + "-" +
@@ -193,24 +214,27 @@ function mcpBridgeAtomicWriteText(file, text) {
     }
 
     // Some ExtendScript hosts overwrite on rename. Prefer that atomic path first.
-    if (tempFile.rename(file.name)) {
+    if (tempFile.rename(targetName)) {
         return;
     }
 
     // Legacy hosts may reject overwrite. Preserve the old valid file as a backup,
     // publish the temp file, then remove the backup. Readers tolerate this short gap.
-    var backupFile = new File(file.parent.fsName + "/." + file.name + ".bak-" + suffix);
-    var hadTarget = file.exists;
-    if (hadTarget && !file.rename(backupFile.name)) {
+    var backupFile = new File(file.parent.fsName + "/." + targetName + ".bak-" + suffix);
+    // Rename a fresh File object because ExtendScript mutates the object path after rename().
+    // Callers may reuse `file` for later state transitions such as running -> completed.
+    var targetFile = new File(targetPath);
+    var hadTarget = targetFile.exists;
+    if (hadTarget && !targetFile.rename(backupFile.name)) {
         try { tempFile.remove(); } catch (_targetRemoveErr) {}
-        throw new Error("Failed to preserve previous file: " + file.fsName);
+        throw new Error("Failed to preserve previous file: " + targetPath);
     }
-    if (!tempFile.rename(file.name)) {
+    if (!tempFile.rename(targetName)) {
         if (hadTarget && backupFile.exists) {
-            try { backupFile.rename(file.name); } catch (_rollbackErr) {}
+            try { backupFile.rename(targetName); } catch (_rollbackErr) {}
         }
         try { tempFile.remove(); } catch (_publishRemoveErr) {}
-        throw new Error("Failed to publish temporary file: " + file.fsName);
+        throw new Error("Failed to publish temporary file: " + targetPath);
     }
     if (backupFile.exists) {
         try { backupFile.remove(); } catch (_backupRemoveErr) {}
@@ -230,7 +254,7 @@ function mcpBridgeWriteHeartbeat() {
     try {
         appVersion = app.version ? String(app.version) : "";
     } catch (_versionErr) {}
-    var updatedAt = new Date().toISOString();
+    var updatedAt = mcpBridgeIsoTimestamp();
     var payload = {
         protocolVersion: 1,
         instanceId: mcpGetBridgeInstanceId(),
@@ -395,7 +419,7 @@ function mcpBridgeCheck() {
                 if (payload.requestId || payload.request_id) {
                     resultObj._requestId = payload.requestId || payload.request_id;
                 }
-                resultObj._responseTimestamp = new Date().toISOString();
+                resultObj._responseTimestamp = mcpBridgeIsoTimestamp();
                 resultString = JSON.stringify(resultObj, null, 2);
             }
         } catch (_e) {}
@@ -416,7 +440,7 @@ function mcpBridgeCheck() {
         mcpBridgeState.lastCommand = command;
         mcpBridgeState.lastMessage = "Executed command: " + command;
         mcpBridgeState.lastError = finalStatus === "error" ? "Command failed" : null;
-        mcpBridgeState.lastRunAt = new Date().toISOString();
+        mcpBridgeState.lastRunAt = mcpBridgeIsoTimestamp();
         mcpBridgeState.currentRequestId = null;
     } catch (err) {
         mcpBridgeState.lastStatus = "error";
