@@ -1062,6 +1062,7 @@ fn run_daemon_command(
             "pollIntervalMs": cfg.poll_interval_ms,
             "retentionSeconds": retention_seconds,
             "globalExclusive": global_exclusive,
+            "expectedOutputPaths": option_args.get("expectedOutputPaths").cloned().unwrap_or_else(|| json!([])),
             "audit": audit
         }),
         timeout_ms,
@@ -1171,9 +1172,7 @@ fn tool_text(text: String) -> Value {
 }
 
 fn tool_json(value: Value) -> Result<Value> {
-    let text =
-        serde_json::to_string_pretty(&value).with_context(|| "failed to serialize tool JSON")?;
-    Ok(tool_text(text))
+    mcp_core::mcp_tool_json(value)
 }
 
 fn tool_error(text: String) -> Value {

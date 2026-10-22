@@ -4,7 +4,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -156,6 +156,8 @@ pub struct RequestRecord {
     pub result: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_raw: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub expected_output_paths: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audit: Option<ScriptFileAudit>,
 }
@@ -578,6 +580,7 @@ impl BridgeClient {
             message: None,
             result: None,
             result_raw: None,
+            expected_output_paths: Vec::new(),
             audit,
         };
         self.write_request_record(&record)?;
@@ -597,6 +600,70 @@ impl BridgeClient {
             record.message = Some(message);
             true
         })
+    }
+
+    /// Opt-in export contract: use fresh absolute paths so an old export cannot
+    /// masquerade as this request's output. Applied equally to late results.
+    pub fn expect_outputs(&self, request_id: &str, paths: Vec<PathBuf>) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        if paths.len() > 16 || paths.iter().any(|p| !p.is_absolute() || p.exists()) {
+            return Err(anyhow!(
+                "expectedOutputPaths must contain at most 16 fresh absolute file paths"
+            ));
+        }
+        self.update_request_record(request_id, |record| {
+            record.expected_output_paths = paths;
+            true
+        })?;
+        Ok(())
+    }
+
+    fn verify_outputs(&self, record: &RequestRecord, mut result: Value) -> Value {
+        if result_record_status(&result) != "completed" || record.expected_output_paths.is_empty() {
+            return result;
+        }
+        // Some Adobe APIs return while the new file is still zero bytes. Wait
+        // only on file availability; never invoke the export again.
+        let availability_deadline = Instant::now() + Duration::from_secs(2);
+        let checked = loop {
+            let attempt: Result<Vec<Value>> = record
+                .expected_output_paths
+                .iter()
+                .map(|path| {
+                    let mut file = File::open(path)
+                        .with_context(|| format!("output is not readable: {}", path.display()))?;
+                    let metadata = file.metadata()?;
+                    if !metadata.is_file() || metadata.len() == 0 {
+                        return Err(anyhow!(
+                            "output is empty or not a regular file: {}",
+                            path.display()
+                        ));
+                    }
+                    let mut byte = [0];
+                    file.read_exact(&mut byte)?;
+                    Ok(json!({"path": path, "bytes": metadata.len(), "readable": true}))
+                })
+                .collect();
+            if attempt.is_ok() || Instant::now() >= availability_deadline {
+                break attempt;
+            }
+            thread::sleep(Duration::from_millis(50));
+        };
+        match checked {
+            Ok(files) => {
+                if !result.is_object() {
+                    result = json!({"status": "success", "value": result});
+                }
+                result["verifiedOutputs"] = json!(files);
+                result
+            }
+            Err(error) => json!({
+                "status": "error", "message": format!("Host returned success, but export verification failed: {error:#}"),
+                "hostResult": result, "requestId": record.request_id
+            }),
+        }
     }
 
     pub fn mark_request_failed(&self, request_id: &str, message: String) -> Result<RequestRecord> {
@@ -681,6 +748,17 @@ impl BridgeClient {
     ) -> Result<BridgeRunOutcome> {
         let registry_path = self.registry_path(request_id);
         let mut record = self.read_request_record(request_id)?;
+        let started = started_at.unwrap_or_else(Instant::now);
+        if record.status == "timeout" || started.elapsed() >= options.timeout {
+            record = self.mark_request_timeout(
+                request_id,
+                "Timed out before dispatch; host code was not submitted.".to_string(),
+            )?;
+            return Ok(BridgeRunOutcome {
+                record,
+                registry_path,
+            });
+        }
         if record.status == "cancelRequested" {
             record.status = "cancelled".to_string();
             record.updated_at = chrono_like_timestamp();
@@ -691,7 +769,6 @@ impl BridgeClient {
                 registry_path,
             });
         }
-        let started = started_at.unwrap_or_else(Instant::now);
         record.host_instance = Some(instance.clone());
         record.updated_at = chrono_like_timestamp();
         self.write_request_record(&record)?;
@@ -726,6 +803,18 @@ impl BridgeClient {
             thread::sleep(options.poll_interval);
         }
 
+        // Recheck after waiting for a busy instance and before any mailbox write.
+        if started.elapsed() >= options.timeout {
+            record = self.mark_request_timeout(
+                request_id,
+                "Timed out before dispatch; host code was not submitted.".to_string(),
+            )?;
+            return Ok(BridgeRunOutcome {
+                record,
+                registry_path,
+            });
+        }
+
         record.status = "dispatched".to_string();
         record.updated_at = chrono_like_timestamp();
         self.write_request_record(&record)?;
@@ -742,6 +831,7 @@ impl BridgeClient {
             if let Some((raw, parsed)) =
                 self.try_read_instance_result(&instance, request_id, Some(command))?
             {
+                let parsed = self.verify_outputs(&record, parsed);
                 record.status = result_record_status(&parsed).to_string();
                 record.updated_at = chrono_like_timestamp();
                 record.result = Some(parsed);
@@ -779,10 +869,7 @@ impl BridgeClient {
 
     pub fn get_request_record(&self, request_id: &str) -> Result<RequestRecord> {
         let mut record = self.read_request_record(request_id)?;
-        if matches!(
-            record.status.as_str(),
-            "completed" | "failed" | "lost" | "cancelled"
-        ) {
+        if matches!(record.status.as_str(), "completed" | "failed" | "cancelled") {
             return Ok(record);
         }
 
@@ -790,6 +877,7 @@ impl BridgeClient {
             if let Some((raw, parsed)) =
                 self.try_read_instance_result(&instance, request_id, Some(&record.command))?
             {
+                let parsed = self.verify_outputs(&record, parsed);
                 record.status = result_record_status(&parsed).to_string();
                 record.updated_at = chrono_like_timestamp();
                 record.result = Some(parsed);
@@ -807,7 +895,8 @@ impl BridgeClient {
                 ));
                 self.write_request_record(&record)?;
                 record = self.read_request_record(request_id)?;
-                self.clear_current_request_if_matches(&instance, request_id)?;
+                // Stale does not mean stopped. Preserve the mailbox reservation
+                // and allow get-result to collect a late result after reconnect.
             }
         }
 
@@ -988,6 +1077,7 @@ impl BridgeClient {
             self.try_read_instance_result(instance, &current.request_id, Some(&current.command))?
         {
             if let Ok(mut record) = self.read_request_record(&current.request_id) {
+                let parsed = self.verify_outputs(&record, parsed);
                 record.status = result_record_status(&parsed).to_string();
                 record.updated_at = chrono_like_timestamp();
                 record.result = Some(parsed);
@@ -1009,8 +1099,7 @@ impl BridgeClient {
                 ));
                 let _ = self.write_request_record(&record);
             }
-            self.clear_current_request(instance)?;
-            return Ok(false);
+            return Ok(true);
         }
 
         Ok(true)
@@ -1197,7 +1286,7 @@ fn request_record_update_lock(path: &Path) -> Result<Arc<Mutex<()>>> {
 }
 
 fn is_terminal_request_status(status: &str) -> bool {
-    matches!(status, "completed" | "failed" | "lost" | "cancelled")
+    matches!(status, "completed" | "failed" | "cancelled")
 }
 
 // A client timeout is recoverable, but a completed/error result is final.
@@ -1205,7 +1294,7 @@ fn is_terminal_request_status(status: &str) -> bool {
 // timeout marker, so those writes must not move the registry backwards.
 fn should_preserve_current_record(current: &RequestRecord, proposed: &RequestRecord) -> bool {
     is_terminal_request_status(&current.status)
-        || (current.status == "timeout"
+        || (matches!(current.status.as_str(), "timeout" | "lost")
             && matches!(
                 proposed.status.as_str(),
                 "queued" | "dispatched" | "running"
@@ -1735,6 +1824,138 @@ mod tests {
         };
         write_json_file(&dir.join("heartbeat.json"), &instance).expect("heartbeat");
         instance
+    }
+
+    #[test]
+    fn expired_queue_deadline_never_writes_host_command() {
+        let (cfg, _guard) = test_config();
+        let instance = write_test_instance(&cfg, "expired-queue");
+        let bridge = BridgeClient::new(cfg).unwrap();
+        let request = bridge
+            .prepare_request("executeJsx", 60, Some(instance.clone()))
+            .unwrap();
+        let options = BridgeRunOptions {
+            target: BridgeTarget::default(),
+            timeout: Duration::from_millis(10),
+            poll_interval: Duration::from_millis(1),
+            retention_seconds: 60,
+        };
+        let outcome = bridge
+            .run_prepared_request_on_instance(
+                &request.record.request_id,
+                "executeJsx",
+                json!({"code": "mutation()"}),
+                instance.clone(),
+                options,
+                Some(Instant::now() - Duration::from_secs(1)),
+            )
+            .unwrap();
+        assert_eq!(outcome.record.status, "timeout");
+        assert!(!Path::new(&instance.command_file).exists());
+        assert!(!instance_current_request_path(&instance).exists());
+    }
+
+    #[test]
+    fn stale_instance_keeps_reservation_and_recovers_late_output() {
+        let (mut cfg, _guard) = test_config();
+        cfg.instance_heartbeat_stale_ms = 0;
+        let instance = write_test_instance(&cfg, "stale-recovery");
+        let bridge = BridgeClient::new(cfg).unwrap();
+        let request = bridge
+            .prepare_request("executeJsx", 60, Some(instance.clone()))
+            .unwrap();
+        let id = &request.record.request_id;
+        bridge
+            .write_current_request(&instance, id, "executeJsx")
+            .unwrap();
+        bridge
+            .mark_request_timeout(id, "caller wait expired".into())
+            .unwrap();
+        thread::sleep(Duration::from_millis(2));
+        assert_eq!(bridge.get_request_record(id).unwrap().status, "lost");
+        assert!(instance_current_request_path(&instance).exists());
+        assert!(bridge.is_instance_busy(&instance).unwrap());
+        write_json_file(
+            Path::new(&instance.result_file),
+            &json!({
+                "status": "success", "_requestId": id, "_commandExecuted": "executeJsx"
+            }),
+        )
+        .unwrap();
+        assert_eq!(bridge.get_request_record(id).unwrap().status, "completed");
+        assert!(!instance_current_request_path(&instance).exists());
+    }
+
+    #[test]
+    fn retained_success_requires_fresh_readable_nonempty_exports() {
+        let (cfg, guard) = test_config();
+        let instance = write_test_instance(&cfg, "export-check");
+        let bridge = BridgeClient::new(cfg).unwrap();
+        for (name, bytes, expected) in [
+            ("missing.png", None, "failed"),
+            ("empty.png", Some(&b""[..]), "failed"),
+            ("valid.png", Some(&b"PNG test bytes"[..]), "completed"),
+        ] {
+            let path = guard.path().join(name);
+            let request = bridge
+                .prepare_request("executeJsx", 60, Some(instance.clone()))
+                .unwrap();
+            let id = &request.record.request_id;
+            bridge.expect_outputs(id, vec![path.clone()]).unwrap();
+            if let Some(bytes) = bytes {
+                fs::write(&path, bytes).unwrap();
+            }
+            write_json_file(
+                Path::new(&instance.result_file),
+                &json!({
+                    "status": "success", "_requestId": id, "_commandExecuted": "executeJsx"
+                }),
+            )
+            .unwrap();
+            let result = bridge.get_request_record(id).unwrap();
+            assert_eq!(result.status, expected, "{name}");
+            if expected == "completed" {
+                assert_eq!(
+                    result.result.unwrap()["verifiedOutputs"][0]["readable"],
+                    true
+                );
+            }
+        }
+        let request = bridge.prepare_request("executeJsx", 60, None).unwrap();
+        assert!(bridge
+            .expect_outputs(
+                &request.record.request_id,
+                vec![guard.path().join("valid.png")]
+            )
+            .is_err());
+        assert!(bridge
+            .expect_outputs(
+                &request.record.request_id,
+                vec![PathBuf::from("relative.png")]
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn output_verification_waits_for_file_publication_without_reexecution() {
+        let (cfg, guard) = test_config();
+        let bridge = BridgeClient::new(cfg).unwrap();
+        let prepared = bridge.prepare_request("executeJsx", 60, None).unwrap();
+        let output = guard.path().join("delayed.png");
+        bridge
+            .expect_outputs(&prepared.record.request_id, vec![output.clone()])
+            .unwrap();
+        let publisher = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            fs::write(output, b"published bytes").unwrap();
+        });
+        let record = bridge
+            .read_request_record(&prepared.record.request_id)
+            .unwrap();
+        let result = bridge.verify_outputs(&record, json!({"status":"success"}));
+        publisher.join().unwrap();
+        assert_eq!(result["status"], "success");
+        assert_eq!(result["verifiedOutputs"][0]["bytes"], 15);
     }
 
     #[test]

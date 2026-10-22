@@ -472,6 +472,7 @@ fn run_bridge_command_value(
             "pollIntervalMs": cfg.poll_interval_ms,
             "retentionSeconds": retention_seconds,
             "globalExclusive": option_args.get("globalExclusive").and_then(Value::as_bool).unwrap_or(false),
+            "expectedOutputPaths": option_args.get("expectedOutputPaths").cloned().unwrap_or_else(|| json!([])),
             "audit": audit
         }),
         timeout_ms,
@@ -513,9 +514,7 @@ fn tool_text(text: String) -> Value {
 }
 
 fn tool_json(value: Value) -> Result<Value> {
-    Ok(tool_text(
-        serde_json::to_string_pretty(&value).with_context(|| "failed to serialize tool JSON")?,
-    ))
+    mcp_core::mcp_tool_json(value)
 }
 
 fn tool_error(text: String) -> Value {

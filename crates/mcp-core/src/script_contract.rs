@@ -467,6 +467,7 @@ pub fn canonical_script_tool_specs(host: HostSpec) -> Vec<ToolSpec> {
         "targetVersion": { "type": "string", "minLength": 1 },
         "timeoutMs": { "type": "integer", "minimum": 1, "maximum": DEFAULT_SCRIPT_TIMEOUT_MAX_MS },
         "resultRetentionSeconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+        "expectedOutputPaths": { "type": "array", "maxItems": 16, "items": { "type": "string", "minLength": 1 }, "description": "Fresh absolute file paths. Before reporting success (including late results), verify each file is nonempty and readable. Existing files are rejected before execution. This checks file availability, not visual correctness." },
         "confirmationToken": { "type": "string", "minLength": 1 }
     });
     if host.id == "aftereffects" {

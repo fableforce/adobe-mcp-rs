@@ -10,7 +10,7 @@ use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tracing::{error, info};
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +37,8 @@ struct DaemonRequest {
     global_exclusive: bool,
     #[serde(default)]
     audit: Option<ScriptFileAudit>,
+    #[serde(default)]
+    expected_output_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -249,6 +251,9 @@ fn handle_request(state: &Arc<DaemonState>, request: DaemonRequest) -> Result<Va
 }
 
 fn handle_run_command(state: &Arc<DaemonState>, request: DaemonRequest) -> Result<Value> {
+    // Queue admission and host execution share one deadline. A script must not
+    // start later simply because its caller timed out in the scheduler queue.
+    let admitted_at = Instant::now();
     let command = request
         .command
         .clone()
@@ -310,6 +315,15 @@ fn handle_run_command(state: &Arc<DaemonState>, request: DaemonRequest) -> Resul
         request.audit.clone(),
     )?;
     let request_id = prepared.record.request_id.clone();
+    if let Err(error) = state
+        .bridge
+        .expect_outputs(&request_id, request.expected_output_paths)
+    {
+        return Ok(state
+            .bridge
+            .mark_request_failed(&request_id, error.to_string())?
+            .to_value());
+    }
     info!(
         "script audit queued host={} requestId={} command={} instance={} retentionSeconds={} sourceSha256={}",
         state.cfg.host_id,
@@ -341,7 +355,7 @@ fn handle_run_command(state: &Arc<DaemonState>, request: DaemonRequest) -> Resul
             request.args,
             instance,
             options,
-            None,
+            Some(admitted_at),
         ) {
             Ok(outcome) => Ok(outcome.to_value()),
             Err(error) => {
@@ -703,6 +717,58 @@ mod tests {
     }
 
     #[test]
+    fn timed_out_scheduler_job_is_not_dispatched_when_worker_unblocks() {
+        let (cfg, _dir, _listener) = test_config();
+        let instance = write_instance(&cfg, "queued-timeout");
+        let state = Arc::new(DaemonState {
+            bridge: BridgeClient::new(cfg.clone()).unwrap(),
+            cfg,
+            scheduler: InstanceScheduler::default(),
+        });
+        let (release_tx, release_rx) = mpsc::channel();
+        let blocker = state
+            .scheduler
+            .submit(
+                "queued-timeout",
+                false,
+                Box::new(move || {
+                    release_rx.recv().unwrap();
+                    Ok(json!({}))
+                }),
+            )
+            .unwrap();
+        let request: DaemonRequest = serde_json::from_value(json!({
+            "op":"runCommand", "command":"executeJsx", "args":{"code":"mutation()"},
+            "timeoutMs": 20, "retentionSeconds":60
+        }))
+        .unwrap();
+        let result = handle_run_command(&state, request).unwrap();
+        assert_eq!(result["state"], "timeout");
+        release_tx.send(()).unwrap();
+        blocker
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        // A subsequent scheduler sentinel proves the expired job has finished.
+        state
+            .scheduler
+            .submit("queued-timeout", false, Box::new(|| Ok(json!({}))))
+            .unwrap()
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap()
+            .unwrap();
+        assert!(!PathBuf::from(instance.command_file).exists());
+        assert_eq!(
+            state
+                .bridge
+                .get_request_record(result["requestId"].as_str().unwrap())
+                .unwrap()
+                .status,
+            "timeout"
+        );
+    }
+
+    #[test]
     fn protocol_supports_all_operations_and_timeout_recovery() {
         let (cfg, _dir, listener) = test_config();
         let instance = write_instance(&cfg, "test-instance");
@@ -719,6 +785,8 @@ mod tests {
 
         let result_path = PathBuf::from(instance.result_file);
         let command_path = PathBuf::from(instance.command_file);
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let (finish_tx, finish_rx) = mpsc::channel();
         thread::spawn(move || {
             let request_id = loop {
                 if let Ok(raw) = fs::read_to_string(&command_path) {
@@ -730,7 +798,10 @@ mod tests {
                 }
                 thread::sleep(Duration::from_millis(5));
             };
-            thread::sleep(Duration::from_millis(80));
+            observed_tx.send(()).unwrap();
+            // The test explicitly releases completion after caller timeout;
+            // execution and result timing no longer depend on a short sleep.
+            finish_rx.recv_timeout(Duration::from_secs(15)).unwrap();
             bridge_core::write_json_file(
                 &result_path,
                 &json!({
@@ -748,7 +819,7 @@ mod tests {
                 "op": "runCommand",
                 "command": "ping",
                 "args": {},
-                "timeoutMs": 20,
+                "timeoutMs": 5_000,
                 "pollIntervalMs": 5,
                 "retentionSeconds": 60,
                 "audit": {
@@ -759,9 +830,13 @@ mod tests {
                     "sourceSizeBytes": 12
                 }
             }),
-            100,
+            6_000,
         )
         .unwrap();
+        observed_rx
+            .try_recv()
+            .expect("host must have received the command before timeout");
+        finish_tx.send(()).unwrap();
         assert_eq!(
             timed_out.get("status").and_then(Value::as_str),
             Some("timeout")

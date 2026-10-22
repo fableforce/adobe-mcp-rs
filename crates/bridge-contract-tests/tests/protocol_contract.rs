@@ -432,11 +432,11 @@ fn timeout_late_result_survives_a_new_daemon_connection() -> Result<()> {
         let fixture = ProtocolFixture::new(*host)?;
         let mock = fixture.start_mock_host("retained")?;
         mock.enqueue(ResponsePlan::delayed(
-            Duration::from_millis(140),
+            Duration::from_millis(1_000),
             json!({ "sequence": 10 }),
         ));
         let first_daemon = fixture.start_daemon()?;
-        let timed_out = run_command(&first_daemon, Some("retained"), 10, 30)?;
+        let timed_out = run_command(&first_daemon, Some("retained"), 10, 300)?;
         assert_eq!(timed_out["status"], "timeout", "{} timeout", host.id);
         let request_id = timed_out["requestId"]
             .as_str()
@@ -479,7 +479,7 @@ fn stale_and_malformed_heartbeats_are_reported_and_reconnect() -> Result<()> {
         fixture.write_malformed_heartbeat("malformed")?;
         mock.enqueue(ResponsePlan::Ignore);
 
-        let timed_out = run_command(&daemon, Some("stale"), 20, 30)?;
+        let timed_out = run_command(&daemon, Some("stale"), 20, 300)?;
         assert_eq!(timed_out["status"], "timeout");
         let request_id = timed_out["requestId"]
             .as_str()
@@ -524,6 +524,26 @@ fn stale_and_malformed_heartbeats_are_reported_and_reconnect() -> Result<()> {
             CONTRACT_DAEMON_CALL_TIMEOUT_MS,
         )?;
         assert_eq!(reconnected["count"], 1, "{} reconnect", host.id);
+        // Reconnection is not permission to overwrite an uncertain mutation.
+        // The same instance must finish its old request before accepting more.
+        let reserved = fixture.instance_dir("stale").join("current_request.json");
+        assert!(
+            reserved.exists(),
+            "{} uncertain request reservation",
+            host.id
+        );
+        bridge_core::write_json_file(
+            &fixture.instance_dir("stale").join(host.result_file_name),
+            &json!({"status":"success", "result":{"sequence":20},
+                "_requestId":request_id, "_commandExecuted":"ping",
+                "_hostInstance":{"hostId":host.id, "instanceId":"stale"}}),
+        )?;
+        let recovered = daemon.call(
+            json!({"op":"getResult", "requestId":request_id}),
+            CONTRACT_DAEMON_CALL_TIMEOUT_MS,
+        )?;
+        assert_completed(&recovered, *host, "stale", 20);
+        assert!(!reserved.exists());
         mock.enqueue(ResponsePlan::success(json!({ "sequence": 21 })));
         let next = run_command(&daemon, Some("stale"), 21, CONTRACT_COMMAND_TIMEOUT_MS)?;
         assert_completed(&next, *host, "stale", 21);

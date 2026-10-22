@@ -11,6 +11,21 @@ use std::{ffi::OsString, os::windows::ffi::OsStringExt, ptr};
 mod script_contract;
 pub use script_contract::*;
 
+/// One error contract for every host, including retained execution outcomes.
+pub fn mcp_tool_json(value: Value) -> Result<Value> {
+    let failed = matches!(
+        value
+            .get("state")
+            .or_else(|| value.get("status"))
+            .and_then(Value::as_str),
+        Some("failed" | "error" | "timeout" | "lost" | "cancelled")
+    );
+    Ok(json!({
+        "content": [{"type": "text", "text": serde_json::to_string_pretty(&value)?}],
+        "isError": failed
+    }))
+}
+
 pub const ALLOWED_SCRIPTS: &[&str] = &[
     "listCompositions",
     "getProjectInfo",
@@ -1184,6 +1199,27 @@ Public access:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_execution_failure_is_an_mcp_error_without_losing_evidence() {
+        for state in ["failed", "timeout", "lost", "cancelled"] {
+            let record =
+                json!({"requestId": "req-example", "state": state, "message": "failure cause"});
+            let result = mcp_tool_json(record.clone()).unwrap();
+            assert_eq!(result["isError"], true);
+            let decoded: Value =
+                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+            assert_eq!(decoded, record);
+        }
+        assert_eq!(
+            mcp_tool_json(json!({"state":"completed"})).unwrap()["isError"],
+            false
+        );
+        assert_eq!(
+            mcp_tool_json(json!({"state":"queued"})).unwrap()["isError"],
+            false
+        );
+    }
 
     fn script_test_config(host: HostSpec, allowed_root: &Path) -> AppConfig {
         let mut cfg = AppConfig::load_for_host(None, host).unwrap();

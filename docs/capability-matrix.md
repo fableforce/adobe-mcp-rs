@@ -1,10 +1,12 @@
 # Adobe host capability matrix と raw-script-first 方針
 
-- 最終更新: 2026-07-15
+- 最終更新: 2026-10-23
 - 対象: After Effects / Premiere Pro / Photoshop / Illustrator / InDesign
 - 関連 Issue: #20、#21、#22
 
 この文書は、Adobe host ごとの機能差と、今後 MCP に何を公開するかの判断基準を定義します。host の実装済み状態は [Adobe host roadmap](adobe-host-roadmap.md)、bridge の共通契約は [bridge protocol](bridge-protocol.md) を source of truth とします。
+
+For measured Windows app/version results, see the [October 23 fork milestone](reliability-milestone-2026-10-23.md). Its verified/partial/untested matrix distinguishes live evidence from the architectural capabilities below. All five applications remain subject to their documented limitations; this is not a production-readiness certification.
 
 ## 結論
 
@@ -49,9 +51,9 @@
 | Premiere Pro | UXP 25.6+、CEP / ExtendScript fallback | **実装済み**。UXP plugin は `allowCodeGenerationFromStrings` が必要。CEP は JSX | **実装済み**。`.js` / `.jsx` | **可**。Promise を含む UXP code に JSON `input` を渡す |
 | Photoshop | UXP API v2 | **実装済み**。UXP plugin の `new Function` wrapper。manifest permission が必要 | **実装済み**。`.js` / `.jsx` | **可**。`app`、`action.batchPlay`、`core.executeAsModal` helper と JSON `input` を渡す |
 | Illustrator | CEP / ExtendScript | **実装済み**。CEP から ExtendScript `eval` | **実装済み**。`.jsx` | **可**。JSON `input` を JSX wrapper 引数として渡す |
-| InDesign | UXP Startup Script `.idjs`（18.5+ PoC） | **repository実装済み・実機未検証**。`eval` / `Function` は使わず、raw文字列を `app.doScript(String, UXPSCRIPT, [], ENTIRE_SCRIPT)` へ渡す | **repository実装済み・実機未検証**。Rustでpath / size / UTF-8 / hashを検証後、sourceを同じString実行経路へ渡す | **repository実装済み・実機未検証**。JSONをwrapper sourceへliteralとして注入する |
+| InDesign | UXP Startup Script `.idjs`（18.5+ PoC） | **Verified on Windows 21.6.0.57** for inline `app.doScript(String, UXPSCRIPT, [], ENTIRE_SCRIPT)`, reads, writes and error recovery; other versions remain untested | **Implemented**. Rust validates path / size / UTF-8 / hash; live file-policy verification is outside this milestone | **Implemented**. JSON is injected into the wrapper; nonempty input conformance is not separately certified by this milestone |
 
-InDesign だけは「raw-first = inline `eval`」ではありません。公式の UXP Script permission では文字列からの code generation が無効なため、repository PoCはInDesign DOMの `app.doScript` String入力を使います。`run-script-file`もhost側の一時fileを作らず、Rustで検証・監査したsourceを同じwrapperへ渡します。長時間動作するStartup Scriptからこの経路が利用できるかは実機E2E gateです。
+InDesign だけは「raw-first = inline `eval`」ではありません。公式の UXP Script permission では文字列からの code generation が無効なため、repository PoCはInDesign DOMの `app.doScript` String入力を使います。`run-script-file`もhost側の一時fileを作らず、Rustで検証・監査したsourceを同じwrapperへ渡します。The long-running Startup Script inline route is verified on the Windows version above; other version/platform combinations remain release gates.
 
 ### Host 操作
 
@@ -59,9 +61,9 @@ InDesign だけは「raw-first = inline `eval`」ではありません。公式�
 |---|---|---|---|---|
 | After Effects | project / composition / layer / effect を取得可能 | composition、layer、keyframe、expression、effect、project を更新可能 | frame preview、render queue、MOGRT 等 | 一部 API は active composition や plugin の matchName に依存 |
 | Premiere Pro | project / sequence / track / clip / marker を取得可能 | UXP DOM action / transaction、または CEP API で更新可能 | sequence export。media / codec API は version と host 状態に依存 | repository の allowlist は小さく、実機 version matrix が未確立 |
-| Photoshop | document / layer / property を DOM / `batchPlay` で取得可能 | DOM / `batchPlay`。変更は `executeAsModal` が必要 | save / export 系 action を実行可能 | repository は読み取り中心。modal、write、export の E2E が不足 |
+| Photoshop | document / layer / property を DOM / `batchPlay` で取得可能 | DOM / `batchPlay`。変更は `executeAsModal` が必要 | save / export 系 action を実行可能 | Windows 27.11.0 layered PSD / text / fill / PNG / reopen verified; other versions, plugin reload and broader modal behavior remain untested |
 | Illustrator | document / artboard / layer / page item を取得可能 | DOM / action で vector、text、layer 等を更新可能 | PNG / JPEG / SVG / PDF 等 | 現行 host version、署名、配布の検証が不足 |
-| InDesign | document / page / story / text / style / link 等を取得可能 | DOM で組版、style、page item、document を更新可能 | PDF / EPUB / image / package 等を host API から実行可能 | `id-mcp`、Startup bridge、document/page/story読取はrepository実装済み。Startup常駐とraw/write/exportは実機未検証 |
+| InDesign | document / page / story / text / style / link 等を取得可能 | DOM で組版、style、page item、document を更新可能 | PDF / EPUB / image / package 等を host API から実行可能 | Windows 21.6.0.57 inline reads/writes, INDD/PDF/IDML and reopen verified; EPUB/package and other versions remain untested |
 
 この表の「可能」は host API の能力です。すべてが現在の allowlist operation として実装済みという意味ではありません。raw-script-first では、host API に到達できれば個別 Tool の追加を待たずに利用できることを重視します。
 
@@ -85,7 +87,7 @@ Undo は便利な回復手段ですが、安全境界や完全な transaction �
 | Premiere Pro | UXP panel lifecycle、CEP fallback。panel の load / unload と再接続を実機確認する | **実装済み**。共通 broker 契約 | AE と同じ共通上限を Phase 1 で導入 | retained result は実装済み。Promise / transaction の協調的 cancellation に限定 |
 | Photoshop | UXP `loadEvent: startup` を使用。modal 中と plugin reload 後の復旧を確認する | **実装済み**。共通 broker 契約 | AE と同じ共通上限を Phase 1 で導入 | retained result は実装済み。`executeAsModal` cancellation は code が interruptible な場合のみ |
 | Illustrator | CEP panel lifecycle。host 起動時 load と panel 非表示時の動作を実機確認する | **実装済み**。共通 broker 契約 | AE と同じ共通上限を Phase 1 で導入 | retained result は実装済み。実行中 ExtendScript の強制停止は保証しない |
-| InDesign | UXP Startup Scriptと未解決top-level Promiseによるpoll/heartbeatをrepository実装。実際の常駐・再接続は実機未検証 | **実装済み**。`HostSpec`、heartbeat、instance別 FIFO | inline/fileとも現在1 MiB上限。fileはRustで検証後にsourceとして転送 | **実装済み**。daemon timeoutとretained resultを共通化。`doScript`実行中の強制停止は前提にしない |
+| InDesign | UXP Startup Script poll/heartbeat and broker-restart recovery verified on Windows 21.6.0.57; full application cold restart remains untested in this milestone | **実装済み**。`HostSpec`、heartbeat、instance別 FIFO | inline/fileとも現在1 MiB上限。fileはRustで検証後にsourceとして転送 | **実装済み**。daemon timeoutとretained resultを共通化。`doScript`実行中の強制停止は前提にしない |
 
 Payload の初期共通予算は次を提案します。値は host 実機 E2E で調整します。
 

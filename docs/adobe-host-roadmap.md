@@ -1,9 +1,11 @@
 # Adobe host support status and roadmap
 
-- 最終更新: 2026-07-15
+- 最終更新: 2026-10-23
 - 対象 revision の確認方法: 本文の「状態を更新するときの検証」を参照
 
 この文書を host 対応状況の source of truth とします。README とセットアップ文書は概要と導入手順を示し、状態区分、runtime、最小機能、既知の制約はこの文書に合わせます。
+
+The [October 23 fork reliability milestone](reliability-milestone-2026-10-23.md) records live Windows evidence for Illustrator, InDesign, Premiere Pro, Photoshop and After Effects. The four experimental apps are not promoted merely because a single set of document tests passed. Architecture and recovery invariants are documented in [fork reliability design](fork-reliability-design.md).
 
 ## 状態区分
 
