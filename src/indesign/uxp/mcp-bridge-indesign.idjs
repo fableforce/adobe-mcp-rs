@@ -381,13 +381,18 @@ async function executeScript(args) {
   const suppliedArgs = args.args && typeof args.args === "object" ? args.args : {};
   const wrapped =
     "const __adobeMcpScript = require('uxp').script;\n" +
+    "let __adobeMcpOutcome;\ntry {\n" +
     "const __adobeMcpResult = (function(args) {\n" +
     args.code +
     "\n})(JSON.parse(" +
     JSON.stringify(JSON.stringify(suppliedArgs)) +
     "));\n" +
-    "__adobeMcpScript.setResult(JSON.stringify(__adobeMcpResult === undefined ? null : __adobeMcpResult));";
-  const serializedResult = app.doScript(
+    "if (__adobeMcpResult && typeof __adobeMcpResult.then === 'function') throw new Error('Promise-returning raw scripts are unsupported');\n" +
+    "__adobeMcpOutcome = {ok: true, value: __adobeMcpResult === undefined ? null : __adobeMcpResult};\n" +
+    "} catch (__adobeMcpError) {\n" +
+    "__adobeMcpOutcome = {ok: false, message: String(__adobeMcpError), line: __adobeMcpError.line || null};\n" +
+    "}\n__adobeMcpScript.setResult(JSON.stringify(__adobeMcpOutcome));";
+  const serializedResult = await app.doScript(
     wrapped,
     ScriptLanguage.UXPSCRIPT,
     [],
@@ -400,9 +405,12 @@ async function executeScript(args) {
       result = JSON.parse(serializedResult);
     } catch (_error) {}
   }
+  if (result && result.ok === false) {
+    return { status: "error", message: result.message, line: result.line };
+  }
   return {
     status: "success",
-    result: toSerializable(result, 8, []),
+    result: toSerializable(result && result.ok === true ? result.value : result, 8, []),
   };
 }
 

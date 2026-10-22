@@ -221,6 +221,9 @@ function aiCleanupAtomicResidues(file) {
 }
 
 function aiWriteFile(file, text) {
+    // File.rename mutates the File object's path in ExtendScript.
+    // Preserve the destination name before moving the previous generation.
+    var targetName = file.name;
     if (file.parent && !file.parent.exists) {
         aiEnsureFolder(file.parent);
     }
@@ -243,7 +246,7 @@ function aiWriteFile(file, text) {
         throw new Error("Failed to flush temporary file: " + tempFile.fsName);
     }
 
-    if (tempFile.rename(file.name)) {
+    if (tempFile.rename(targetName)) {
         return;
     }
 
@@ -253,9 +256,9 @@ function aiWriteFile(file, text) {
         try { tempFile.remove(); } catch (_targetRemoveErr) {}
         throw new Error("Failed to preserve previous file: " + file.fsName);
     }
-    if (!tempFile.rename(file.name)) {
+    if (!tempFile.rename(targetName)) {
         if (hadTarget && backupFile.exists) {
-            try { backupFile.rename(file.name); } catch (_rollbackErr) {}
+            try { backupFile.rename(targetName); } catch (_rollbackErr) {}
         }
         try { tempFile.remove(); } catch (_publishRemoveErr) {}
         throw new Error("Failed to publish temporary file: " + file.fsName);
