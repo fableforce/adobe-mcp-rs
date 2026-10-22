@@ -60,7 +60,7 @@ InDesign だけは「raw-first = inline `eval`」ではありません。公式�
 | Host | Read | Write | Export / render | 現在の主な不足 |
 |---|---|---|---|---|
 | After Effects | project / composition / layer / effect を取得可能 | composition、layer、keyframe、expression、effect、project を更新可能 | frame preview、render queue、MOGRT 等 | 一部 API は active composition や plugin の matchName に依存 |
-| Premiere Pro | project / sequence / track / clip / marker を取得可能 | UXP DOM action / transaction、または CEP API で更新可能 | sequence export。media / codec API は version と host 状態に依存 | repository の allowlist は小さく、実機 version matrix が未確立 |
+| Premiere Pro | project / sequence / track / clip / marker を取得可能 | UXP DOM action / transaction、または CEP API で更新可能 | sequence export。media / codec API は version と host 状態に依存 | Windows 26.5.2 fresh MOGRT title passed native-path save/reopen and visible H.264 export; modal handling and broader version matrix remain partial |
 | Photoshop | document / layer / property を DOM / `batchPlay` で取得可能 | DOM / `batchPlay`。変更は `executeAsModal` が必要 | save / export 系 action を実行可能 | Windows 27.11.0 layered PSD / text / fill / PNG / reopen verified; other versions, plugin reload and broader modal behavior remain untested |
 | Illustrator | document / artboard / layer / page item を取得可能 | DOM / action で vector、text、layer 等を更新可能 | PNG / JPEG / SVG / PDF 等 | 現行 host version、署名、配布の検証が不足 |
 | InDesign | document / page / story / text / style / link 等を取得可能 | DOM で組版、style、page item、document を更新可能 | PDF / EPUB / image / package 等を host API から実行可能 | Windows 21.6.0.57 inline reads/writes, INDD/PDF/IDML and reopen verified; EPUB/package and other versions remain untested |

@@ -69,6 +69,12 @@ failures. These are separate observations, not proof that export itself failed.
 Do not retry that mutation against the old document. Use isolated new documents,
 save before MOGRT export and reacquire DOM references after host operations.
 
+The follow-up fresh-MOGRT/native-Windows-path save workflow passed: the title
+survived a successful saveAs, project reopen and visible video export. Cancelling
+the earlier dialog returned `saved:false` even though one clip remained live.
+Always check the save return value; live timeline visibility is not persistence.
+The earlier failure's sole cause and universal modal handling remain unproven.
+
 ## Coverage boundary
 
 All five stdio adapters use the shared MCP result helper and forward the new

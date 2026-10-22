@@ -8,7 +8,8 @@ Branch: `harden/adobe-app-reliability`. Source baseline:
 
 This is a reviewable first hardening milestone for Illustrator, InDesign,
 Premiere Pro and Photoshop, with After Effects regression coverage. It is not a
-production-readiness claim. Premiere's title workflow remains unresolved.
+production-readiness claim. Premiere's title now passes a fresh native-path
+save/reopen/render test; modal and full application-restart behavior remain partial.
 
 ## Verified scope
 
@@ -24,7 +25,7 @@ V = verified on the stated Windows version; P = partial; U = untested.
 | Illustrator 30.8.2 | V: AI, three editable vector shapes, one 900 x 500 artboard | V: SVG and PNG, square/circle/triangle inspected | V | V: one marker layer | U |
 | InDesign 21.6.0.57 | V: INDD, one page, two editable stories and rectangle | V: PDF/IDML; PDF rendered and title/layout inspected | V | V: one document-label mutation | U |
 | Photoshop 27.11.0 | V: layered PSD, editable text and fill, 1200 x 800 | V: PNG inspected | V | V: one marker layer | U |
-| Premiere Pro 26.5.2 | P: project saved, one main sequence created; initial creation required user dialogs | V: baseline H.264 MP4 decoded, 1920 x 1080, five seconds; title not certified | V | V: one additional test sequence | U |
+| Premiere Pro 26.5.2 | V: native-path project saved/reopened with one title clip; P: initial/modal creation required user dialogs | V: H.264 MP4 decoded, 1920 x 1080, five seconds; title visibly present after reopen | V | V: one additional test sequence | U |
 | After Effects 26.5x89 | V: AEP saved/reopened; 1920 x 1080, five seconds, editable title, two opacity and two position keys | V: four PNG previews; fade and movement inspected | V | V: one invisible null marker | U |
 
 Each timeout test submitted the mutation once, stopped the validation broker,
@@ -66,10 +67,22 @@ fixed. The shared transport changes do not change Adobe's MOGRT implementation.
 
 Premiere's old evidence records one title clip before save and zero afterward;
 the reopened/rendered output lacks it. XML references are not proof of a live
-clip. A new insertion/save test using the freshly exported MOGRT timed out on
-request `req-18e0e7be9cf91988-42772-1`. Its reservation is preserved and the
-mutation was not retried. The result must be recovered before continuing that
-project. Baseline media export success does not certify the title workflow.
+clip. A fresh insertion/save test timed out on request
+`req-18e0e7be9cf91988-42772-1` while an Adobe "Project Modified" dialog was open.
+After the user cancelled the dialog, the same request ID recovered with one live
+title clip but `saved:false`. Its fixture's `persisted:true` field was incorrectly
+based on live clip count; it is not evidence of a disk save. The insertion was
+never repeated.
+
+A subsequent `saveAs` to a fresh native Windows path returned `true`, produced a
+readable `premiere-title-native.prproj` and kept one title clip. Reopening that
+file retained one five-second background clip and one five-second title clip.
+The newly encoded `premiere-title-native.mp4` decoded as 1920 x 1080 H.264/AAC,
+five seconds. Direct frame inspection shows "Adobe MCP Test" in the output.
+The fresh MOGRT and native-path save workflow is verified; these changes do not
+isolate the sole cause of the older failure or remove every possible Adobe dialog.
+The Windows save recipe checks Adobe's boolean result rather than declaring
+success from timeline visibility. Broader restart/version testing is still needed.
 
 ## Checks
 
@@ -113,8 +126,8 @@ the original dirty patch, request JSON, scripts, native files, previews,
 `timeout-summary.json`, `final-tests.log`, `build.log` and `clippy.log`. Private
 configuration backups and original test documents are not committed or pushed.
 
-Next milestone: resolve Premiere's title persistence and modal save behavior,
-then test genuine application/panel restarts and reconnect across the four main
+Next milestone: harden Premiere's modal save behavior and test genuine
+application/panel restarts and reconnect across the four main
 apps. Keep a single Codex-facing entrypoint as a later composition of existing
 shared crates, after these adapter lifecycle paths are dependable.
 
